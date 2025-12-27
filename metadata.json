@@ -1,6 +1,6 @@
 {
-  "name": "EYN POS Pro & Calculator",
-  "description": "Système complet de gestion de produits, calculateur de coûts professionnel et point de vente mobile-first pour le commerce de cosmétiques.",
+  "name": "EYN PRO AI",
+  "description": "Système de gestion intelligent avec scan IA Gemini pour cosmétiques.",
   "requestFramePermissions": [
     "camera"
   ]
