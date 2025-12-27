@@ -1,178 +1,387 @@
 
-import React, { useState, useEffect } from 'react';
-import { Search, Package, Barcode, Trash2, Edit2, Smartphone, Plus, Camera, AlertCircle } from 'lucide-react';
-import { Product, PRE_DETECTED_PRODUCTS } from '../types.ts';
+import React, { useState, useEffect, useRef } from 'react';
+import { Search, Edit2, Trash2, X, ScanLine, Layers, Info, Ruler, Plus, Image as ImageIcon, Camera, ImagePlus, TrendingUp, ChevronRight, Sparkles, Loader2, CheckCircle, Package } from 'lucide-react';
+import { Product, UserProfile, Family } from '../types.ts';
 import BarcodeScanner from '../components/BarcodeScanner.tsx';
+import { GoogleGenAI, Type } from "@google/genai";
 
-const ProductManager: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'STOCK' | 'IMPORT' | 'BATCH'>('STOCK');
+const ProductManager: React.FC<{ currentUser: UserProfile | null }> = ({ currentUser }) => {
   const [products, setProducts] = useState<Product[]>([]);
+  const [families, setFamilies] = useState<Family[]>([]);
   const [search, setSearch] = useState('');
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
-  const [batchList, setBatchList] = useState<{prod: Product, q: number}[]>([]);
+  
+  // IA Wizard State
+  const [isAIScanning, setIsAIScanning] = useState(false);
+  const [aiStep, setAiStep] = useState<'IDLE' | 'FRONT' | 'BACK' | 'PROCESSING'>('IDLE');
+  const [aiPhotos, setAiPhotos] = useState<{ front: string; back: string }>({ front: '', back: '' });
+  
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const aiCameraRef = useRef<HTMLInputElement>(null);
+
+  const emptyProduct: Product = {
+    id: '',
+    name: '',
+    category: 'Cosmétique',
+    barcode: '',
+    costPrice: 0,
+    sellPrice: 0,
+    stock: 0,
+    description: '',
+    volume: '',
+    imageUrl: '',
+    familyId: ''
+  };
+
+  const [formState, setFormState] = useState<Product>(emptyProduct);
+  const [marginInput, setMarginInput] = useState<number>(0);
 
   useEffect(() => {
-    const saved = localStorage.getItem('eyn_products');
-    if (saved) setProducts(JSON.parse(saved));
+    setProducts(JSON.parse(localStorage.getItem('eyn_products') || '[]'));
+    setFamilies(JSON.parse(localStorage.getItem('eyn_families') || '[]'));
   }, []);
 
-  const saveProducts = (newList: Product[]) => {
+  useEffect(() => {
+    if (formState.costPrice > 0) {
+      const calculated = Math.round(((formState.sellPrice - formState.costPrice) / formState.costPrice) * 100);
+      setMarginInput(calculated);
+    }
+  }, [formState.costPrice, formState.sellPrice]);
+
+  const processWithGemini = async (frontBase64: string, backBase64: string) => {
+    setAiStep('PROCESSING');
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      
+      const prompt = `
+        Tu es un assistant expert en inventaire pour une boutique de cosmétiques nommée EYN.
+        Analyse ces deux photos (FACE et DOS) du produit.
+        Extrais les données suivantes en JSON structuré :
+        - name: Nom commercial exact (ex: Nivea Soft).
+        - description: Une phrase de description marketing/usage.
+        - category: (Cosmétique, Soin, Maquillage, Capillaire, Parfum).
+        - volume: La contenance visible (ex: 200ml, 50g, 3.5oz).
+        - barcode: Cherche un code-barres (EAN/UPC) sur la photo DOS. Si non trouvé, génère un code court type EYN-XXXX.
+        - quantity: Compte COMBIEN de produits identiques tu vois sur la photo FACE (important pour l'inventaire).
+
+        Retourne uniquement le JSON.
+      `;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: [
+          {
+            parts: [
+              { text: prompt },
+              { inlineData: { data: frontBase64.split(',')[1], mimeType: 'image/jpeg' } },
+              { inlineData: { data: backBase64.split(',')[1], mimeType: 'image/jpeg' } },
+            ],
+          },
+        ],
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              name: { type: Type.STRING },
+              description: { type: Type.STRING },
+              category: { type: Type.STRING },
+              volume: { type: Type.STRING },
+              barcode: { type: Type.STRING },
+              quantity: { type: Type.INTEGER },
+            },
+            required: ["name", "barcode", "quantity"]
+          }
+        }
+      });
+
+      const data = JSON.parse(response.text || "{}");
+      
+      setFormState({
+        ...emptyProduct,
+        id: Math.random().toString(36).substr(2, 9),
+        name: data.name || 'Produit Inconnu',
+        description: data.description || '',
+        category: data.category || 'Cosmétique',
+        volume: data.volume || '',
+        barcode: data.barcode || '',
+        stock: data.quantity || 1,
+        imageUrl: frontBase64
+      });
+      
+      setIsCreating(true);
+      setIsAIScanning(false);
+      setAiStep('IDLE');
+    } catch (error) {
+      console.error(error);
+      alert("L'IA a rencontré un problème. Essayez de prendre des photos plus nettes.");
+      setAiStep('IDLE');
+    }
+  };
+
+  const handleAICapture = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const base64 = reader.result as string;
+        if (aiStep === 'FRONT') {
+          setAiPhotos(prev => ({ ...prev, front: base64 }));
+          setAiStep('BACK');
+        } else if (aiStep === 'BACK') {
+          setAiPhotos(prev => ({ ...prev, back: base64 }));
+          processWithGemini(aiPhotos.front, base64);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handlePriceChange = (field: 'cost' | 'sell' | 'margin', value: number) => {
+    setFormState(prev => {
+      const newState = { ...prev };
+      if (field === 'cost') newState.costPrice = value;
+      else if (field === 'sell') newState.sellPrice = value;
+      else if (field === 'margin') newState.sellPrice = Math.round(newState.costPrice * (1 + (value / 100)));
+      return newState;
+    });
+  };
+
+  const startEdit = (p: Product) => {
+    setEditingProduct(p);
+    setFormState(p);
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formState.name) return;
+    const newList = editingProduct 
+      ? products.map(p => p.id === formState.id ? formState : p)
+      : [formState, ...products];
     setProducts(newList);
     localStorage.setItem('eyn_products', JSON.stringify(newList));
+    setIsCreating(false);
+    setEditingProduct(null);
+    setFormState(emptyProduct);
   };
-
-  const deleteProduct = (id: string) => {
-    if (confirm("Supprimer définitivement ce produit ?")) {
-      saveProducts(products.filter(p => p.id !== id));
-    }
-  };
-
-  const onBatchScan = (code: string) => {
-    const prod = products.find(p => p.barcode === code);
-    if (prod) {
-      const existing = batchList.find(b => b.prod.id === prod.id);
-      if (existing) {
-        setBatchList(batchList.map(b => b.prod.id === prod.id ? { ...b, q: b.q + 1 } : b));
-      } else {
-        setBatchList([...batchList, { prod, q: 1 }]);
-      }
-    } else {
-      alert("Produit inconnu dans le catalogue : " + code);
-    }
-  };
-
-  const saveBatch = () => {
-    const updated = products.map(p => {
-      const batchItem = batchList.find(b => b.prod.id === p.id);
-      if (batchItem) return { ...p, stock: p.stock + batchItem.q };
-      return p;
-    });
-    saveProducts(updated);
-    setBatchList([]);
-    alert("✅ Stocks mis à jour !");
-  };
-
-  // Stats
-  const totalItems = products.length;
-  const noBarcode = products.filter(p => !p.barcode).length;
-  const totalStockValue = products.reduce((s, p) => s + (p.costPrice * p.stock), 0);
 
   return (
-    <div className="space-y-4 animate-in fade-in duration-500">
-      {isScanning && <BarcodeScanner onScan={onBatchScan} onClose={() => setIsScanning(false)} title="Batch Scanner" />}
+    <div className="space-y-4 pb-24 relative min-h-[60vh]">
+      <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={(e) => {
+        const file = e.target.files?.[0];
+        if (file) {
+          const r = new FileReader();
+          r.onloadend = () => setFormState(prev => ({...prev, imageUrl: r.result as string}));
+          r.readAsDataURL(file);
+        }
+      }} />
+      <input type="file" ref={cameraInputRef} className="hidden" accept="image/*" capture="environment" onChange={(e) => {
+        const file = e.target.files?.[0];
+        if (file) {
+          const r = new FileReader();
+          r.onloadend = () => setFormState(prev => ({...prev, imageUrl: r.result as string}));
+          r.readAsDataURL(file);
+        }
+      }} />
+      
+      <input type="file" ref={aiCameraRef} className="hidden" accept="image/*" capture="environment" onChange={handleAICapture} />
 
-      <div className="flex bg-slate-200 p-1 rounded-2xl gap-1">
-        <button onClick={() => setActiveTab('STOCK')} className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${activeTab === 'STOCK' ? 'bg-white shadow text-slate-900' : 'text-slate-500'}`}>📦 Stock</button>
-        <button onClick={() => setActiveTab('IMPORT')} className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${activeTab === 'IMPORT' ? 'bg-white shadow text-slate-900' : 'text-slate-500'}`}>📥 Import</button>
-        <button onClick={() => setActiveTab('BATCH')} className={`flex-1 py-3 text-[10px] font-black uppercase tracking-widest rounded-xl transition-all ${activeTab === 'BATCH' ? 'bg-white shadow text-slate-900' : 'text-slate-500'}`}>⚡ Batch</button>
-      </div>
-
-      {activeTab === 'STOCK' && (
-        <>
-          <div className="grid grid-cols-3 gap-2">
-            <div className="bg-white p-3 rounded-2xl border border-slate-100 shadow-sm text-center">
-              <p className="text-[7px] font-black uppercase text-slate-400">Total</p>
-              <p className="text-sm font-black text-slate-900">{totalItems}</p>
+      {/* IA SMART WIZARD MODAL (OPTIONNEL) */}
+      {isAIScanning && (
+        <div className="fixed inset-0 z-[700] bg-slate-900/98 backdrop-blur-2xl flex items-center justify-center p-6">
+          <div className="bg-white w-full max-w-sm rounded-[3rem] p-8 text-center space-y-6 shadow-2xl animate-in zoom-in-95">
+            <div className="flex justify-between items-center border-b border-slate-50 pb-4">
+               <div className="flex items-center gap-2 bg-yellow-500 text-slate-900 px-3 py-1 rounded-full text-[9px] font-black uppercase">
+                 <Sparkles className="w-3 h-3"/> IA OPTIONNELLE
+               </div>
+               <button onClick={() => { setIsAIScanning(false); setAiStep('IDLE'); }} className="p-2 bg-slate-50 rounded-full"><X className="w-4 h-4 text-slate-400"/></button>
             </div>
-            <div className="bg-white p-3 rounded-2xl border border-slate-100 shadow-sm text-center">
-              <p className="text-[7px] font-black uppercase text-slate-400">Sans Code</p>
-              <p className="text-sm font-black text-red-500">{noBarcode}</p>
-            </div>
-            <div className="bg-white p-3 rounded-2xl border border-slate-100 shadow-sm text-center">
-              <p className="text-[7px] font-black uppercase text-slate-400">Valeur Stock</p>
-              <p className="text-[10px] font-black text-green-600">{totalStockValue.toLocaleString()} FG</p>
-            </div>
-          </div>
 
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
-            <input type="text" placeholder="Chercher produit..." className="w-full bg-white border-2 border-slate-100 rounded-2xl pl-10 pr-4 py-3 text-sm font-bold" value={search} onChange={e => setSearch(e.target.value)} />
-          </div>
-
-          <div className="space-y-2 pb-10">
-            {products.filter(p => p.name.toLowerCase().includes(search.toLowerCase())).map(p => (
-              <div key={p.id} className="bg-white p-4 rounded-2xl border border-slate-50 flex justify-between items-center shadow-sm group">
-                <div className="flex-1">
-                  <h4 className="text-sm font-black text-slate-900">{p.name}</h4>
-                  <div className="flex gap-2 mt-1">
-                    <span className="text-[8px] font-black bg-slate-100 px-2 py-0.5 rounded-full text-slate-400 uppercase flex items-center gap-1">
-                      <Barcode className="w-2.5 h-2.5" /> {p.barcode || '---'}
-                    </span>
-                    <span className={`text-[8px] font-black px-2 py-0.5 rounded-full uppercase ${p.stock > 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>Stock: {p.stock}</span>
-                    <span className="text-[8px] font-black bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full uppercase">{p.sellPrice.toLocaleString()} FG</span>
+            <div className="space-y-4">
+              {aiStep === 'FRONT' && (
+                <>
+                  <div className="w-36 h-36 bg-slate-50 rounded-[2.5rem] mx-auto flex items-center justify-center border-4 border-dashed border-slate-100 relative overflow-hidden">
+                    <Camera className="w-10 h-10 text-slate-200" />
+                  </div>
+                  <h3 className="text-xl font-black text-slate-900 leading-tight">1. Photo FACE</h3>
+                  <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest leading-relaxed">
+                    Visez le devant du produit.<br/>L'IA va identifier le nom et compter les unités.
+                  </p>
+                  <button onClick={() => aiCameraRef.current?.click()} className="w-full bg-slate-900 text-yellow-500 py-6 rounded-2xl font-black uppercase text-xs shadow-xl active:scale-95 transition-all">Prendre la photo</button>
+                </>
+              )}
+              {aiStep === 'BACK' && (
+                <>
+                  <div className="w-36 h-36 bg-slate-50 rounded-[2.5rem] mx-auto flex items-center justify-center border-4 border-dashed border-slate-100 overflow-hidden relative">
+                    <img src={aiPhotos.front} className="w-full h-full object-cover opacity-20" />
+                    <CheckCircle className="absolute w-12 h-12 text-emerald-500" />
+                  </div>
+                  <h3 className="text-xl font-black text-slate-900 leading-tight">2. Photo DOS</h3>
+                  <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest leading-relaxed">
+                    Visez l'arrière du produit.<br/>L'IA va extraire le code-barres et les détails.
+                  </p>
+                  <button onClick={() => aiCameraRef.current?.click()} className="w-full bg-slate-900 text-yellow-500 py-6 rounded-2xl font-black uppercase text-xs shadow-xl active:scale-95 transition-all">Prendre le dos</button>
+                </>
+              )}
+              {aiStep === 'PROCESSING' && (
+                <div className="py-10 flex flex-col items-center gap-8">
+                  <div className="relative">
+                    <div className="w-24 h-24 border-4 border-slate-100 border-t-yellow-500 rounded-full animate-spin"></div>
+                    <Sparkles className="absolute inset-0 m-auto w-10 h-10 text-yellow-500 animate-pulse" />
+                  </div>
+                  <div className="space-y-3">
+                    <h3 className="text-lg font-black text-slate-900 uppercase tracking-widest">Analyse IA en cours...</h3>
+                    <div className="flex flex-col gap-1">
+                      <p className="text-[8px] text-slate-400 font-black uppercase animate-pulse flex items-center justify-center gap-2">
+                        <span className="w-1 h-1 bg-yellow-500 rounded-full"></span> Extraction du Code
+                      </p>
+                      <p className="text-[8px] text-slate-400 font-black uppercase animate-pulse flex items-center justify-center gap-2 delay-75">
+                        <span className="w-1 h-1 bg-yellow-500 rounded-full"></span> Comptage des articles
+                      </p>
+                      <p className="text-[8px] text-slate-400 font-black uppercase animate-pulse flex items-center justify-center gap-2 delay-150">
+                        <span className="w-1 h-1 bg-yellow-500 rounded-full"></span> Rédaction de la fiche
+                      </p>
+                    </div>
                   </div>
                 </div>
-                <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button onClick={() => deleteProduct(p.id)} className="p-2 text-red-200 hover:text-red-500 transition-colors">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            ))}
+              )}
+            </div>
           </div>
-        </>
+        </div>
       )}
 
-      {activeTab === 'BATCH' && (
-        <div className="space-y-4">
-          <div className="bg-blue-50 p-4 rounded-2xl border border-blue-100 flex items-start gap-3">
-            <AlertCircle className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
-            <p className="text-[10px] font-bold text-blue-700 leading-relaxed">
-              Le Batch Scanner permet de scanner plusieurs produits à la suite pour augmenter leur stock rapidement.
-            </p>
-          </div>
-          <button onClick={() => setIsScanning(true)} className="w-full bg-slate-900 text-yellow-500 py-6 rounded-[2.5rem] font-black uppercase tracking-widest text-xs flex items-center justify-center gap-3 shadow-xl active:scale-95 transition-all">
-            <Camera className="w-5 h-5" /> Lancer Scanner en Continu
-          </button>
-          
-          {batchList.length > 0 && (
-            <div className="bg-white p-6 rounded-[2.5rem] border shadow-sm space-y-4 animate-in slide-in-from-bottom-4">
-              <h3 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Articles détectés</h3>
-              <div className="space-y-2">
-                {batchList.map(b => (
-                  <div key={b.prod.id} className="flex justify-between items-center bg-slate-50 p-3 rounded-xl">
-                    <span className="text-xs font-black text-slate-700">{b.prod.name}</span>
-                    <span className="bg-yellow-500 text-slate-900 px-3 py-1 rounded-lg font-black text-[10px]">x{b.q}</span>
-                  </div>
-                ))}
-              </div>
-              <button onClick={saveBatch} className="w-full bg-yellow-500 text-slate-900 font-black py-4 rounded-2xl uppercase text-[10px] tracking-widest shadow-lg">
-                Valider l'entrée en Stock
-              </button>
-            </div>
-          )}
-        </div>
+      {isScanning && (
+        <BarcodeScanner 
+          onScan={(code) => { setFormState(prev => ({...prev, barcode: code})); setIsScanning(false); }} 
+          onClose={() => setIsScanning(false)} 
+        />
       )}
       
-      {activeTab === 'IMPORT' && (
-        <div className="space-y-6 text-center py-10">
-           <div className="bg-slate-900 p-8 rounded-[3rem] text-white">
-              <Package className="w-16 h-16 text-yellow-500 mx-auto mb-6 animate-bounce" />
-              <h3 className="text-xl font-black mb-2 uppercase tracking-widest">40+ Produits Détectés</h3>
-              <p className="text-xs text-white/50 mb-8 leading-relaxed px-4">Importez instantanément notre catalogue de base (Nivea, Vaseline, Cerave, etc.)</p>
-              <button onClick={() => {
-                const updated = [...products];
-                PRE_DETECTED_PRODUCTS.forEach(p => {
-                  if (!products.find(existing => existing.name === p.name)) {
-                    updated.push({
-                      id: Math.random().toString(36).substr(2,9), 
-                      ...p, 
-                      barcode: '', 
-                      costPrice:0, 
-                      sellPrice:0, 
-                      stock:0
-                    });
-                  }
-                });
-                saveProducts(updated);
-                alert("Catalogue importé avec succès !");
-                setActiveTab('STOCK');
-              }} className="w-full bg-yellow-500 text-slate-900 font-black py-5 rounded-3xl uppercase tracking-widest text-[10px] shadow-xl">
-                 Importer le Catalogue
+      {(isCreating || editingProduct) && (
+        <div className="fixed inset-0 z-[600] bg-slate-900/90 backdrop-blur-md flex items-end sm:items-center justify-center">
+           <form onSubmit={handleSubmit} className="bg-white w-full max-w-md rounded-t-[3rem] sm:rounded-[2.5rem] p-6 pt-8 space-y-5 animate-in slide-in-from-bottom duration-300 shadow-2xl overflow-y-auto max-h-[92vh] hide-scrollbar">
+              <div className="flex justify-between items-center border-b border-slate-50 pb-4">
+                <h3 className="font-black text-[9px] uppercase tracking-[0.2em] text-slate-400">
+                  {editingProduct ? "ÉDITER L'ARTICLE" : "VÉRIFICATION INVENTAIRE"}
+                </h3>
+                <button type="button" onClick={() => { setIsCreating(false); setEditingProduct(null); setFormState(emptyProduct); }} className="p-2 bg-slate-50 rounded-full"><X className="w-5 h-5 text-slate-400" /></button>
+              </div>
+
+              <div className="space-y-4 text-left">
+                <div className="space-y-1.5">
+                  <label className="text-[9px] font-black uppercase text-slate-400 tracking-widest ml-1">Code Barres / Code Produit</label>
+                  <div className="flex gap-2">
+                    <input type="text" className="flex-1 bg-slate-50 p-4 rounded-2xl text-sm font-black border-2 border-transparent focus:border-slate-900 outline-none" value={formState.barcode} onChange={e => setFormState({...formState, barcode: e.target.value})} />
+                    <button type="button" onClick={() => setIsScanning(true)} className="bg-slate-900 text-yellow-500 px-5 rounded-2xl shadow-lg active:scale-90 transition-transform"><ScanLine className="w-5 h-5"/></button>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[9px] font-black uppercase text-slate-400 tracking-widest ml-1">Désignation</label>
+                  <input type="text" required className="w-full bg-slate-50 p-4 rounded-2xl text-sm font-black border-2 border-transparent focus:border-slate-900 outline-none" value={formState.name} onChange={e => setFormState({...formState, name: e.target.value})} />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <label className="text-[9px] font-black uppercase text-slate-400 tracking-widest ml-1">Famille</label>
+                    <select className="w-full bg-slate-50 p-4 rounded-2xl text-[10px] font-black border-2 border-transparent outline-none appearance-none" value={formState.familyId} onChange={e => setFormState({...formState, familyId: e.target.value})}>
+                      <option value="">Standard</option>
+                      {families.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                    </select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-[9px] font-black uppercase text-slate-400 tracking-widest ml-1">Stock Compté</label>
+                    <input type="number" className="w-full bg-slate-50 p-4 rounded-2xl text-sm font-black border-2 border-transparent outline-none" value={formState.stock} onChange={e => setFormState({...formState, stock: parseInt(e.target.value) || 0})} />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <label className="text-[9px] font-black uppercase text-slate-400 tracking-widest ml-1">Visuel</label>
+                  <div className="flex gap-4 h-24">
+                    <button type="button" onClick={() => cameraInputRef.current?.click()} className="flex-1 bg-slate-50 rounded-3xl border-2 border-dashed border-slate-200 flex flex-col items-center justify-center gap-1 active:bg-slate-100 transition-colors">
+                      <Camera className="w-6 h-6 text-slate-400" />
+                      <span className="text-[8px] font-black uppercase text-slate-500">Photo</span>
+                    </button>
+                    {formState.imageUrl && (
+                      <div className="w-24 h-24 rounded-3xl overflow-hidden border-2 border-slate-900 shadow-xl relative animate-in zoom-in-50">
+                        <img src={formState.imageUrl} className="w-full h-full object-cover" />
+                        <button onClick={() => setFormState(prev => ({...prev, imageUrl: ''}))} className="absolute top-1 right-1 bg-red-500 text-white p-1 rounded-full"><X className="w-3 h-3"/></button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-slate-900 p-6 rounded-[2.5rem] space-y-5 shadow-2xl">
+                   <div className="grid grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <label className="text-[9px] font-black uppercase text-white/30 tracking-widest ml-1">P. Achat</label>
+                        <input type="number" className="w-full bg-white/5 border border-white/10 p-4 rounded-2xl text-sm font-black text-white outline-none focus:border-yellow-500" value={formState.costPrice || ''} onChange={e => handlePriceChange('cost', parseFloat(e.target.value) || 0)} placeholder="0" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[9px] font-black uppercase text-white/30 tracking-widest ml-1">P. Vente</label>
+                        <input type="number" className="w-full bg-yellow-500/10 border border-yellow-500/20 p-4 rounded-2xl text-sm font-black text-yellow-500 outline-none focus:border-yellow-500" value={formState.sellPrice || ''} onChange={e => handlePriceChange('sell', parseFloat(e.target.value) || 0)} placeholder="0" />
+                      </div>
+                   </div>
+                   <div className="flex items-center justify-between bg-white/5 p-4 rounded-2xl border border-white/5">
+                      <span className="text-[10px] font-black uppercase text-white/50 tracking-widest flex items-center gap-2"><TrendingUp className="w-4 h-4 text-emerald-400"/> Marge (%)</span>
+                      <input type="number" className="w-16 bg-emerald-500/10 text-emerald-400 text-right p-2 rounded-xl font-black text-sm border-none outline-none" value={marginInput} onChange={e => handlePriceChange('margin', parseFloat(e.target.value) || 0)} />
+                   </div>
+                </div>
+              </div>
+
+              <button type="submit" className="w-full bg-slate-900 text-yellow-500 py-6 rounded-[2.2rem] font-black uppercase text-xs tracking-widest shadow-2xl active:scale-[0.97] transition-all">
+                {editingProduct ? "Sauvegarder les modifs" : "Valider l'Inventaire"}
               </button>
-           </div>
+           </form>
         </div>
       )}
+
+      {/* Barre de Recherche Épurée avec Option IA */}
+      <div className="flex gap-2 items-center">
+        <div className="relative flex-1">
+          <Search className="absolute left-5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
+          <input type="text" placeholder="Recherche..." className="w-full bg-white rounded-3xl pl-12 pr-6 py-5 text-sm font-black shadow-sm border border-slate-100 outline-none focus:border-slate-300 transition-all" value={search} onChange={e => setSearch(e.target.value)} />
+        </div>
+        <button onClick={() => { setAiStep('FRONT'); setIsAIScanning(true); }} className="bg-yellow-500 text-slate-900 p-5 rounded-3xl shadow-xl active:scale-90 transition-all flex items-center gap-2">
+          <Sparkles className="w-5 h-5" />
+          <span className="text-[10px] font-black uppercase hidden sm:block">IA (Option)</span>
+        </button>
+      </div>
+
+      <div className="space-y-2.5">
+        {products.filter(p => p.name.toLowerCase().includes(search.toLowerCase()) || p.barcode.includes(search)).map(p => (
+          <div key={p.id} className="bg-white p-4 rounded-[2.5rem] border border-slate-100 flex justify-between items-center shadow-sm active:bg-slate-50 transition-all cursor-pointer" onClick={() => startEdit(p)}>
+            <div className="flex gap-4 flex-1 min-w-0 items-center">
+              {p.imageUrl ? (
+                <div className="w-14 h-14 rounded-2xl overflow-hidden bg-slate-100 flex-shrink-0 shadow-inner">
+                  <img src={p.imageUrl} className="w-full h-full object-cover" />
+                </div>
+              ) : (
+                <div className="w-14 h-14 rounded-2xl bg-slate-50 border border-slate-100 flex items-center justify-center text-slate-200">
+                  <ImageIcon className="w-6 h-6 opacity-30" />
+                </div>
+              )}
+              <div className="flex-1 min-w-0 text-left">
+                <h4 className="text-[11px] font-black uppercase text-slate-800 truncate leading-none mb-1">{p.name}</h4>
+                <p className="text-[8px] font-bold text-slate-400 uppercase tracking-widest">{families.find(f => f.id === p.familyId)?.name || 'Standard'} • {p.volume || 'S/V'}</p>
+                <div className="flex gap-2 mt-2">
+                  <span className={`px-2 py-0.5 rounded-lg text-[7px] font-black uppercase ${p.stock <= 5 ? 'bg-red-50 text-red-500' : 'bg-slate-50 text-slate-500'}`}>Stock: {p.stock}</span>
+                  <span className="bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded-lg text-[7px] font-black uppercase">{p.sellPrice.toLocaleString()} FG</span>
+                </div>
+              </div>
+            </div>
+            <div className="bg-slate-50 p-3 rounded-2xl text-slate-200"><ChevronRight className="w-5 h-5" /></div>
+          </div>
+        ))}
+      </div>
+
+      {/* FAB Bouton "Plus" Standard (Saisie Manuelle Directe) */}
+      <button onClick={() => { setIsCreating(true); setEditingProduct(null); setFormState(emptyProduct); }} className="fixed bottom-24 right-6 w-16 h-16 bg-slate-900 text-yellow-500 rounded-full shadow-2xl flex items-center justify-center active:scale-90 transition-all z-50 border-4 border-white">
+        <Plus className="w-8 h-8" />
+      </button>
     </div>
   );
 };
