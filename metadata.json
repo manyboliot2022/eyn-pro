@@ -1,7 +1,0 @@
-{
-  "name": "EYN PRO AI",
-  "description": "Système de gestion intelligent avec scan IA Gemini pour cosmétiques.",
-  "requestFramePermissions": [
-    "camera"
-  ]
-}
